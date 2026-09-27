@@ -63,6 +63,7 @@ body {
   font-family: inherit;
 }
 .row { margin-top: 10px; }
+.input-hint { margin: 10px 0 0; }
 
 .panes {
   display: grid;

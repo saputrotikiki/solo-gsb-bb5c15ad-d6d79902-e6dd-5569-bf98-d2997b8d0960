@@ -20,6 +20,13 @@
  * 回到待复核，消失的替换连同确认一并移除。仅当当前替换均已通过且敏感信息巡检无
  * 「仍泄漏」项时，「下载交付稿」可用，按当前匿名预览生成 UTF-8 TXT；
  * 重新加载原稿清空全部确认。
+ *
+ * 本地工作包：顶部「下载工作包」把当前工作保存为 version=1 的 JSON（原稿、人物规则、
+ * 框选、保留例外、共享称呼裁决、引文与复核确认；不含预览、巡检结果与撤销栈）；
+ * 「导入工作包」先整体校验（版本 / 字段类型 / 各集合 ID 唯一 / 人物引用 / 裁决候选 /
+ * 区间合法），任一错误按字段路径逐条提示且当前工作不变；通过后一次性替换当前工作，
+ * 复用匿名化引擎重算预览与巡检，复核确认仅保留与当前替换完全匹配者，撤销栈清空，
+ * 继续新增人物或区间不复用文件中已有的 ID。文件读写全部在浏览器本地完成。
  */
 (function () {
   'use strict';
@@ -305,6 +312,7 @@
 
     $('btnUndo').disabled = state.history.length === 0;
     $('btnCopy').disabled = !state.text;
+    $('btnDownloadPack').disabled = !state.text;
   }
 
   function renderPersons() {
@@ -968,6 +976,119 @@
     setTimeout(function () { URL.revokeObjectURL(url); }, 0);
     toast('已按当前匿名预览生成交付稿 delivery.txt（UTF-8）');
   }
+
+  // ---------- 本地工作包（下载 / 导入，全程浏览器本地完成） ----------
+  // 工作包为 version=1 的 JSON：保存原稿、人物规则、框选、保留例外、共享称呼裁决、
+  // 引文与复核确认；不保存预览、巡检结果与撤销栈（均可由保存内容重算）。
+  // 导入先整体校验（Anonymizer.validateWorkPack），任一错误都带具体字段路径提示且
+  // 当前工作不变；通过后一次性替换当前工作并清空撤销栈，复核确认仅保留与当前替换
+  // （原稿半开区间 + 人物 ID + 实际代号）完全匹配者，其余丢弃。
+
+  function downloadWorkPack() {
+    if (!state.text) return; // 按钮已禁用，此处兜底
+    var pack = Anonymizer.buildWorkPack(state);
+    var blob = new Blob([JSON.stringify(pack, null, 2)], { type: 'application/json;charset=utf-8' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = 'work-package.json';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(function () { URL.revokeObjectURL(url); }, 0);
+    toast('已下载工作包 work-package.json（不含预览、巡检结果与撤销栈）');
+  }
+
+  // 各集合编号从文件中已有最大 ID 之后继续，保证新增人物 / 区间不复用已有 ID
+  function maxIdPlusOne(list) {
+    var m = 0;
+    list.forEach(function (x) { if (x.id > m) m = x.id; });
+    return m + 1;
+  }
+
+  // 校验通过后一次性恢复：替换当前工作、清空撤销栈、复用引擎重算预览与巡检。
+  // 返回被丢弃的复核确认条数（与当前替换不匹配者）。
+  function applyWorkPack(pack) {
+    state.text = pack.text;
+    state.persons = pack.persons.map(function (p, i) {
+      return { id: p.id, codename: p.codename, aliases: p.aliases.slice(), color: PALETTE[i % PALETTE.length] };
+    });
+    state.selections = pack.selections.map(function (s) {
+      return { id: s.id, start: s.start, end: s.end, personId: s.personId };
+    });
+    state.exceptions = pack.exceptions.map(function (x) {
+      return { id: x.id, start: x.start, end: x.end, personId: x.personId };
+    });
+    state.rulings = Object.assign({}, pack.rulings);
+    state.citations = pack.citations.map(function (c) {
+      return { id: c.id, start: c.start, end: c.end };
+    });
+    // 复核确认先按文件重建为按键索引的记录；render 的 rebuildReviews 只保留
+    // 与当前替换（原稿半开区间 + 人物 ID + 实际代号）完全匹配的确认，其余丢弃
+    var approvals = {};
+    pack.reviewApprovals.forEach(function (a) {
+      approvals[reviewKey(a.start, a.end, a.personId, a.codename)] = {
+        start: a.start, end: a.end, personId: a.personId, codename: a.codename
+      };
+    });
+    var approvalTotal = Object.keys(approvals).length;
+    state.reviewApprovals = approvals;
+    state.reviewList = [];
+    state.history = []; // 恢复后清空撤销栈
+    // 继续新增人物或区间不得复用文件中已有的 ID
+    personSeq = maxIdPlusOne(state.persons);
+    selSeq = maxIdPlusOne(state.selections);
+    excSeq = maxIdPlusOne(state.exceptions);
+    citSeq = maxIdPlusOne(state.citations);
+    state.candidates = Anonymizer.detectSensitive(state.text); // 巡检候选随原稿重新离线扫描
+    state.inspect = [];
+    state.inspectFilter = 'all';
+    activeCid = null;
+    closePopup();
+    closeMergeDialog();
+    closeBatchDialog();
+    inputSection.classList.add('hidden');
+    editorSection.classList.remove('hidden');
+    $('btnResetText').classList.remove('hidden');
+    render(); // 复用匿名化引擎重算预览、巡检与复核清单
+    return approvalTotal - Object.keys(state.reviewApprovals).length;
+  }
+
+  $('btnDownloadPack').addEventListener('click', downloadWorkPack);
+
+  $('btnImportPack').addEventListener('click', function () {
+    var input = $('packFileInput');
+    input.value = ''; // 允许重复选择同一文件
+    input.click();
+  });
+
+  $('packFileInput').addEventListener('change', function () {
+    var file = this.files && this.files[0];
+    if (!file) return;
+    var reader = new FileReader();
+    reader.onload = function () {
+      var pack;
+      try {
+        pack = JSON.parse(String(reader.result));
+      } catch (e) {
+        window.alert('工作包导入失败：文件不是合法 JSON（' + e.message + '）。\n当前工作保持不变。');
+        return;
+      }
+      var errors = Anonymizer.validateWorkPack(pack);
+      if (errors.length) {
+        window.alert('工作包校验未通过，当前工作保持不变。发现 ' + errors.length + ' 处错误：\n\n' +
+          errors.map(function (e2) { return '• ' + e2.path + '：' + e2.message; }).join('\n'));
+        return;
+      }
+      var dropped = applyWorkPack(pack);
+      toast('工作包已导入，当前工作已替换，撤销栈已清空' +
+        (dropped > 0 ? '；' + dropped + ' 条复核确认与当前替换不匹配，已丢弃' : ''));
+    };
+    reader.onerror = function () {
+      window.alert('工作包读取失败，当前工作保持不变。');
+    };
+    reader.readAsText(file, 'utf-8');
+  });
 
   // ---------- 双向高亮 ----------
   function clearActive() {

@@ -13,7 +13,10 @@
       <button id="btnExample" class="btn">加载内置示例</button>
       <button id="btnUndo" class="btn" disabled>撤销最近操作</button>
       <button id="btnCopy" class="btn" disabled>复制匿名预览</button>
+      <button id="btnDownloadPack" class="btn" disabled title="把当前工作（原稿、人物规则、框选、例外、裁决、引文、复核确认）保存为 version=1 的 JSON 工作包，全程浏览器本地完成">下载工作包</button>
+      <button id="btnImportPack" class="btn" title="从本地 JSON 工作包恢复全部工作：先整体校验，任一错误按字段路径提示且当前工作不变；通过后一次性替换当前工作">导入工作包</button>
       <button id="btnResetText" class="btn btn-ghost hidden">重新粘贴原稿</button>
+      <input type="file" id="packFileInput" accept=".json,application/json" class="hidden">
     </div>
   </header>
 
@@ -24,6 +27,7 @@
     <div class="row">
       <button id="btnLoadText" class="btn btn-primary">加载原稿，开始匿名化</button>
     </div>
+    <p class="hint input-hint">已有下载过的工作包？直接点顶部「导入工作包」，从本地 JSON 恢复上次的原稿、人物规则、框选、例外、裁决、引文与复核确认。</p>
   </section>
 
   <!-- 第二步：编辑区 -->

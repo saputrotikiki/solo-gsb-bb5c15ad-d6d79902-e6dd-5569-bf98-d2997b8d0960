@@ -374,12 +374,192 @@
     });
   }
 
+  // ================= 本地工作包（version=1，纯函数） =================
+  // 工作包保存：原稿、人物规则、框选、保留例外、共享称呼裁决、引文与复核确认；
+  // 不保存匿名预览、巡检结果与撤销栈（均可由保存内容重算）。
+  var WORK_PACK_VERSION = 1;
+
+  /**
+   * 由当前工作状态生成工作包对象（version=1），可直接 JSON.stringify 后下载。
+   * 人物的 color 等界面派生字段不写入（导入时按列表顺序重新配色）；
+   * 复核确认由按键索引的记录展开为数组。
+   *
+   * @param {Object} state { text, persons, selections, exceptions, rulings,
+   *   citations, reviewApprovals }（reviewApprovals 为 key -> {start,end,personId,codename}）
+   * @returns {Object} 工作包对象
+   */
+  function buildWorkPack(state) {
+    var approvals = [];
+    Object.keys(state.reviewApprovals || {}).forEach(function (k) {
+      var a = state.reviewApprovals[k];
+      approvals.push({ start: a.start, end: a.end, personId: a.personId, codename: a.codename });
+    });
+    return {
+      version: WORK_PACK_VERSION,
+      text: state.text,
+      persons: (state.persons || []).map(function (p) {
+        return { id: p.id, codename: p.codename, aliases: (p.aliases || []).slice() };
+      }),
+      selections: (state.selections || []).map(function (s) {
+        return { id: s.id, start: s.start, end: s.end, personId: s.personId };
+      }),
+      exceptions: (state.exceptions || []).map(function (x) {
+        return { id: x.id, start: x.start, end: x.end, personId: x.personId };
+      }),
+      rulings: Object.assign({}, state.rulings || {}),
+      citations: (state.citations || []).map(function (c) {
+        return { id: c.id, start: c.start, end: c.end };
+      }),
+      reviewApprovals: approvals
+    };
+  }
+
+  /**
+   * 校验工作包（version=1）。返回错误数组 [{ path, message }]，空数组表示通过；
+   * path 为具体字段路径（如 selections[2].end、rulings["老师"]），供导入方逐条提示。
+   *
+   * 校验项：
+   *   1. 版本必须为 1（版本不符时无法按本格式解释其余字段，直接返回）；
+   *   2. 各字段类型（text 字符串；persons/selections/exceptions/citations/reviewApprovals
+   *      为对象数组；rulings 为对象；id/personId/start/end 为整数；codename/aliases 为字符串）；
+   *   3. 各集合（persons/selections/exceptions/citations）内 id 唯一；
+   *   4. selections/exceptions 的 personId 必须引用已存在的人物；
+   *   5. rulings 的每个键必须是多位人物共有的共享称呼，且裁决值属于该称呼的候选人物；
+   *   6. 所有 start/end 为原稿 UTF-16 码元范围内的非空整数半开区间（0 <= start < end <= 原稿长度）。
+   *
+   * 复核确认是否与当前替换匹配属于恢复阶段的保留/丢弃判定，不在此报错；
+   * 未列出的字段一律忽略（前向兼容）。校验失败时调用方不得改动当前工作。
+   *
+   * @param {*} pack 待校验的工作包（JSON.parse 结果）
+   * @returns {Array<{path:string, message:string}>}
+   */
+  function validateWorkPack(pack) {
+    var errors = [];
+    function err(path, msg) { errors.push({ path: path, message: msg }); }
+
+    if (!pack || typeof pack !== 'object' || Array.isArray(pack)) {
+      err('$', '工作包必须是 JSON 对象');
+      return errors;
+    }
+    if (pack.version !== WORK_PACK_VERSION) {
+      err('version', '必须为 ' + WORK_PACK_VERSION + '（当前工作包格式版本），实际为 ' +
+        (pack.version === undefined ? '（缺失）' : JSON.stringify(pack.version)));
+      return errors;
+    }
+
+    var textOk = typeof pack.text === 'string';
+    if (!textOk) err('text', '必须为字符串（原稿全文）');
+    var textLen = textOk ? pack.text.length : 0;
+
+    // 区间：原稿 UTF-16 码元范围内的非空整数半开区间 [start, end)
+    function checkInterval(path, s, e) {
+      var sOk = Number.isInteger(s), eOk = Number.isInteger(e);
+      if (!sOk) err(path + '.start', '必须为整数（UTF-16 码元偏移）');
+      if (!eOk) err(path + '.end', '必须为整数（UTF-16 码元偏移）');
+      if (!sOk || !eOk || !textOk) return;
+      if (s < 0) err(path + '.start', '必须 ≥ 0');
+      if (e <= s) err(path, '必须为非空半开区间（start < end），实际为 [' + s + ', ' + e + ')');
+      else if (e > textLen) {
+        err(path + '.end', '超出原稿范围（原稿共 ' + textLen + ' 个 UTF-16 码元，end 最大为 ' + textLen + '）');
+      }
+    }
+
+    // persons：对象形状 + id 唯一 + codename/aliases 类型
+    var persons = pack.persons;
+    var personsOk = Array.isArray(persons);
+    if (!personsOk) { err('persons', '必须为数组'); persons = []; }
+    var personIds = {};
+    persons.forEach(function (p, i) {
+      var path = 'persons[' + i + ']';
+      if (!p || typeof p !== 'object' || Array.isArray(p)) { err(path, '必须为对象'); return; }
+      if (!Number.isInteger(p.id)) err(path + '.id', '必须为整数');
+      else if (personIds[p.id]) err(path + '.id', '人物 ID 重复：' + p.id);
+      else personIds[p.id] = true;
+      if (typeof p.codename !== 'string') err(path + '.codename', '必须为字符串（统一代号）');
+      if (!Array.isArray(p.aliases)) err(path + '.aliases', '必须为字符串数组（称呼列表）');
+      else p.aliases.forEach(function (a, j) {
+        if (typeof a !== 'string') err(path + '.aliases[' + j + ']', '称呼必须为字符串');
+      });
+    });
+
+    function checkPersonRef(path, pid) {
+      if (!Number.isInteger(pid)) { err(path, '必须为整数（人物 ID）'); return; }
+      if (personsOk && !personIds[pid]) err(path, '引用了不存在的人物 ID：' + pid);
+    }
+
+    // 带 id 的集合：对象形状 + id 唯一 + 逐项校验
+    function checkIdCollection(name, list, eachItem) {
+      if (!Array.isArray(list)) { err(name, '必须为数组'); return; }
+      var ids = {};
+      list.forEach(function (item, i) {
+        var path = name + '[' + i + ']';
+        if (!item || typeof item !== 'object' || Array.isArray(item)) { err(path, '必须为对象'); return; }
+        if (!Number.isInteger(item.id)) err(path + '.id', '必须为整数');
+        else if (ids[item.id]) err(path + '.id', 'ID 重复：' + item.id);
+        else ids[item.id] = true;
+        eachItem(item, path);
+      });
+    }
+
+    checkIdCollection('selections', pack.selections, function (s, path) {
+      checkInterval(path, s.start, s.end);
+      checkPersonRef(path + '.personId', s.personId);
+    });
+    checkIdCollection('exceptions', pack.exceptions, function (x, path) {
+      checkInterval(path, x.start, x.end);
+      checkPersonRef(path + '.personId', x.personId);
+    });
+    checkIdCollection('citations', pack.citations, function (c, path) {
+      checkInterval(path, c.start, c.end);
+    });
+
+    // 共享称呼裁决：每个裁决必须属于对应共享称呼的候选人物
+    var rulings = pack.rulings;
+    if (!rulings || typeof rulings !== 'object' || Array.isArray(rulings)) {
+      err('rulings', '必须为对象（{ "共享称呼": 归属人物ID }）');
+    } else {
+      var safePersons = (personsOk ? persons : []).map(function (p) {
+        return { id: p && p.id, aliases: Array.isArray(p && p.aliases) ? p.aliases : [] };
+      });
+      var owners = aliasOwners(safePersons);
+      Object.keys(rulings).forEach(function (alias) {
+        var pid = rulings[alias];
+        var path = 'rulings[' + JSON.stringify(alias) + ']';
+        if (!Number.isInteger(pid)) { err(path, '裁决值必须为整数（归属人物 ID）'); return; }
+        if (!personsOk) return;
+        var ids = owners[alias];
+        if (!ids || ids.length < 2) {
+          err(path, '「' + alias + '」不是多位人物共有的共享称呼，不能登记裁决');
+        } else if (ids.indexOf(pid) === -1) {
+          err(path, '人物 ID ' + pid + ' 不属于共享称呼「' + alias + '」的候选人物（候选：' + ids.join('、') + '）');
+        }
+      });
+    }
+
+    // 复核确认：区间 + 人物 ID + 实际代号的类型校验；
+    // 与当前替换不匹配的确认在恢复时丢弃，不在此报错
+    var approvals = pack.reviewApprovals;
+    if (!Array.isArray(approvals)) err('reviewApprovals', '必须为数组');
+    else approvals.forEach(function (a, i) {
+      var path = 'reviewApprovals[' + i + ']';
+      if (!a || typeof a !== 'object' || Array.isArray(a)) { err(path, '必须为对象'); return; }
+      checkInterval(path, a.start, a.end);
+      if (!Number.isInteger(a.personId)) err(path + '.personId', '必须为整数（人物 ID）');
+      if (typeof a.codename !== 'string') err(path + '.codename', '必须为字符串（确认时的实际代号）');
+    });
+
+    return errors;
+  }
+
   return {
     anonymize: anonymize,
     aliasOwners: aliasOwners,
     buildCitation: buildCitation,
     planBatchAssign: planBatchAssign,
     detectSensitive: detectSensitive,
-    classifyCandidates: classifyCandidates
+    classifyCandidates: classifyCandidates,
+    WORK_PACK_VERSION: WORK_PACK_VERSION,
+    buildWorkPack: buildWorkPack,
+    validateWorkPack: validateWorkPack
   };
 });

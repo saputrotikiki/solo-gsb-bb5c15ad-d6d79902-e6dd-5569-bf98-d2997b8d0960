@@ -67,6 +67,9 @@
   var batchClashSel = $('batchClashSel'), batchClashEx = $('batchClashEx');
   var citationList = $('citationList');
   var reviewListEl = $('reviewList'), reviewStatsEl = $('reviewStats');
+  var btnDownloadPackage = $('btnDownloadPackage'),
+      btnImportPackage = $('btnImportPackage'),
+      packageFileInput = $('packageFileInput');
   var toastEl = $('toast');
 
   // ---------- 工具 ----------
@@ -305,6 +308,7 @@
 
     $('btnUndo').disabled = state.history.length === 0;
     $('btnCopy').disabled = !state.text;
+    btnDownloadPackage.disabled = !state.text;
   }
 
   function renderPersons() {
@@ -1514,6 +1518,138 @@
 
   mergeDialog.addEventListener('mousedown', function (e) {
     if (e.target === mergeDialog) closeMergeDialog(); // 点击遮罩关闭
+  });
+
+  // ---------- 本地工作包（下载 / 导入，全部在浏览器内完成） ----------
+  // 工作包（version=1 JSON）保存可重建工作的事实数据：原稿、人物规则、框选、
+  // 保留原文例外、共享称呼裁决、引文区间与复核确认。不保存匿名预览、巡检结果
+  // 与撤销栈——恢复后复用匿名化引擎重算预览与巡检，撤销栈清空。
+  // 导入先经 WorkPackage.validate 逐项校验（版本、字段类型、各集合 ID 唯一性、
+  // 人物引用、裁决是否属于该共享称呼的候选人物、区间是否为原稿 UTF-16 范围内的
+  // 非空整数半开区间）；任一错误提示具体字段路径，当前工作保持不变。
+  function downloadWorkPackage() {
+    if (!state.text) return;
+    var blob = new Blob([JSON.stringify(WorkPackage.serialize(state), null, 2)],
+      { type: 'application/json;charset=utf-8' });
+    var url = URL.createObjectURL(blob);
+    var a = document.createElement('a');
+    a.href = url;
+    a.download = 'work-package.json';
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+    setTimeout(function () { URL.revokeObjectURL(url); }, 0);
+    toast('已下载工作包 work-package.json（version=1，仅含可重建数据）');
+  }
+
+  function importWorkPackageFile(file) {
+    var reader = new FileReader();
+    reader.onload = function () {
+      var data;
+      try {
+        data = JSON.parse(reader.result);
+      } catch (e) {
+        window.alert('工作包不是合法 JSON 文件，导入已取消（当前工作不变）。\n\n解析错误：' + e.message);
+        return;
+      }
+      var res = WorkPackage.validate(data);
+      if (!res.ok) {
+        window.alert('工作包校验失败，导入已取消（当前工作不变）。\n\n字段路径：' +
+          res.path + '\n问题：' + res.message);
+        return;
+      }
+      var hasCurrentWork = !!(state.text || state.persons.length || state.selections.length ||
+        state.exceptions.length || state.citations.length || textInput.value.trim());
+      if (hasCurrentWork &&
+          !window.confirm('导入将整体替换当前原稿、人物规则、框选、例外、裁决、引文与复核确认（撤销栈清空）。确定继续？')) {
+        return;
+      }
+      restoreWorkPackage(res.pkg);
+    };
+    reader.onerror = function () { window.alert('文件读取失败：' + (reader.error && reader.error.message || '未知错误')); };
+    reader.readAsText(file, 'utf-8');
+  }
+
+  // 校验通过后一次性恢复；预览、映射、巡检、复核清单均由引擎与 render 重算。
+  function restoreWorkPackage(pkg) {
+    closePopup();
+    closeMergeDialog();
+    closeBatchDialog();
+
+    state.text = pkg.text;
+    textInput.value = '';
+    // 颜色等界面属性不持久化，按恢复后的列表顺序重新分配
+    state.persons = pkg.persons.map(function (p, i) {
+      return { id: p.id, codename: p.codename, aliases: p.aliases.slice(),
+        color: PALETTE[i % PALETTE.length] };
+    });
+    state.selections = pkg.selections.map(function (s) {
+      return { id: s.id, start: s.start, end: s.end, personId: s.personId };
+    });
+    state.exceptions = pkg.exceptions.map(function (x) {
+      return { id: x.id, start: x.start, end: x.end, personId: x.personId };
+    });
+    state.rulings = Object.assign({}, pkg.rulings);
+    state.citations = pkg.citations.map(function (c) {
+      return { id: c.id, start: c.start, end: c.end };
+    });
+    state.history = []; // 恢复后撤销栈清空
+    state.candidates = Anonymizer.detectSensitive(pkg.text); // 巡检结果不持久化：重新扫描
+    state.inspect = [];
+    state.inspectFilter = 'all';
+    activeCid = null;
+
+    // 自增序列跳过已导入 ID：继续新增人物或区间不得复用已有 ID
+    function maxId(list) {
+      return list.reduce(function (m, x) { return Math.max(m, x.id); }, 0);
+    }
+    personSeq = maxId(pkg.persons) + 1;
+    selSeq = maxId(pkg.selections) + 1;
+    excSeq = maxId(pkg.exceptions) + 1;
+    citSeq = maxId(pkg.citations) + 1;
+
+    // 先用空复核确认渲染一次，由 rebuildReviews 按当前最终映射重建替换段清单
+    state.reviewApprovals = {};
+    state.reviewList = [];
+    inputSection.classList.add('hidden');
+    editorSection.classList.remove('hidden');
+    $('btnResetText').classList.remove('hidden');
+    render();
+
+    // 确认仅在原稿区间、人物 ID 与实际代号均匹配当前替换时保留，其余丢弃
+    var kept = 0, dropped = 0;
+    pkg.reviews.forEach(function (r) {
+      var hit = state.reviewList.some(function (cur) {
+        return cur.start === r.start && cur.end === r.end &&
+          cur.personId === r.personId && cur.codename === r.codename;
+      });
+      if (hit) {
+        state.reviewApprovals[reviewKey(r.start, r.end, r.personId, r.codename)] = {
+          start: r.start, end: r.end, personId: r.personId, codename: r.codename
+        };
+        kept++;
+      } else {
+        dropped++;
+      }
+    });
+    if (kept || dropped) render();
+
+    var msg = '已导入工作包：原稿 ' + pkg.text.length + ' 字符（UTF-16），人物 ' +
+      pkg.persons.length + ' 位、框选 ' + pkg.selections.length + ' 处、例外 ' +
+      pkg.exceptions.length + ' 条、裁决 ' + Object.keys(pkg.rulings).length +
+      ' 项、引文 ' + pkg.citations.length + ' 条；预览与巡检已重算，撤销栈已清空。';
+    if (pkg.reviews.length) {
+      msg += '\n复核确认保留 ' + kept + ' 条，丢弃 ' + dropped + ' 条（与当前替换不一致）。';
+    }
+    window.alert(msg);
+  }
+
+  btnDownloadPackage.addEventListener('click', downloadWorkPackage);
+  btnImportPackage.addEventListener('click', function () { packageFileInput.click(); });
+  packageFileInput.addEventListener('change', function () {
+    var file = packageFileInput.files && packageFileInput.files[0];
+    packageFileInput.value = ''; // 允许再次选择同一文件
+    if (file) importWorkPackageFile(file);
   });
 
   // ---------- 顶部操作 ----------

@@ -11,9 +11,12 @@
     <h1>访谈稿匿名化映射编辑器</h1>
     <div class="topbar-actions">
       <button id="btnExample" class="btn">加载内置示例</button>
+      <button id="btnImportPackage" class="btn" title="从本地 JSON 工作包导入并替换当前工作（文件仅在浏览器内读取，不上传）">导入工作包…</button>
+      <button id="btnDownloadPackage" class="btn" disabled title="下载 version=1 的 JSON 工作包：原稿、人物规则、框选、保留例外、共享称呼裁决、引文与复核确认（不含预览、巡检结果与撤销栈）">下载工作包</button>
       <button id="btnUndo" class="btn" disabled>撤销最近操作</button>
       <button id="btnCopy" class="btn" disabled>复制匿名预览</button>
       <button id="btnResetText" class="btn btn-ghost hidden">重新粘贴原稿</button>
+      <input id="packageFileInput" type="file" accept=".json,application/json" class="hidden">
     </div>
   </header>
 
@@ -171,6 +174,7 @@
   <div id="toast" class="toast hidden"></div>
 
   <script src="anonymize.js"></script>
+  <script src="workpackage.js"></script>
   <script src="app.js"></script>
 </body>
 </html>
